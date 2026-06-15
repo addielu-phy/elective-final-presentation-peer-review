@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>多元選修期末發表互評網站</title>
+  <meta name="description" content="多元選修期末發表：匯入人名、個人抽籤、1 分鐘報告、1 分鐘互評換場、QR 即時評分、斷線自動重連與 Excel 匯出。" />
+  <link rel="stylesheet" href="src/styles.css" />
+  <script defer src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/qrious@4.0.2/dist/qrious.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script defer src="src/app.js"></script>
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Individual Presentation Peer Review</p>
+        <h1>多元選修期末發表互評網站</h1>
+        <p class="lead">匯入人名、隨機抽籤、每人 1 分鐘上台、1 分鐘同儕評分與換場、QR 即時收分、掉線自動重連、Excel 匯出。</p>
+      </div>
+      <div class="hero-badge">
+        <span>GitHub Pages 穩定版</span>
+        <strong>個人發表</strong>
+      </div>
+    </header>
+
+    <main id="teacherApp" class="mode-panel hidden">
+      <section class="notice">
+        <strong>/goal：</strong>建立一個多元選修期末發表的個人互評網站。老師可匯入學生姓名並抽籤決定上台順序；每人報告 1 分鐘，接著評分 1 分鐘，同時下一位準備上台；學生掃同一個 QR Code 即可即時評分；若學生掉線或重新整理，系統會記住活動連結與身分並自動重連，不需要每次重新掃 QR Code。活動結束可匯出 Excel 與 JSON 備份。
+      </section>
+
+      <section class="grid two">
+        <div class="card">
+          <h2>① 匯入名單與抽籤</h2>
+          <label>活動名稱</label>
+          <input id="titleInput" type="text" />
+
+          <label>學生名單</label>
+          <textarea id="rosterInput" placeholder="一行一位學生。可寫：01 王小明，或直接寫王小明。也可從 Excel/試算表貼上。"></textarea>
+          <p class="hint">系統會自動解析座號與姓名；若沒有座號，會用匯入順序補上。</p>
+
+          <div class="grid two compact-grid">
+            <div>
+              <label>報告時間（秒）</label>
+              <input id="reportSecondsInput" type="number" min="20" max="600" step="5" inputmode="numeric" />
+            </div>
+            <div>
+              <label>評分／換場時間（秒）</label>
+              <input id="ratingSecondsInput" type="number" min="20" max="600" step="5" inputmode="numeric" />
+            </div>
+          </div>
+
+          <div class="actions">
+            <button id="saveShuffleBtn" class="primary">儲存名單並抽籤</button>
+            <button id="reshuffleBtn">重新抽籤</button>
+            <button id="resetScoresBtn" class="danger-outline">清空評分</button>
+          </div>
+          <p id="rosterHint" class="hint">目前 0 人</p>
+        </div>
+
+        <div class="card">
+          <h2>② 學生 QR Code / 掉線改善</h2>
+          <div class="session-row">
+            <button id="startSessionBtn" class="primary">建立即時收分 Session</button>
+            <span id="sessionStatus" class="pill muted">尚未建立</span>
+          </div>
+          <div class="qr-layout">
+            <canvas id="qrCanvas" width="230" height="230" aria-label="學生評分 QR Code"></canvas>
+            <div>
+              <p class="hint">學生固定網址</p>
+              <div id="studentUrl" class="urlbox">尚未建立 session</div>
+              <div class="actions tight">
+                <button id="copyStudentUrlBtn">複製網址</button>
+                <button id="copySessionCodeBtn">複製代碼</button>
+              </div>
+              <p class="hint">Session 代碼：<strong id="sessionCodeText">—</strong></p>
+              <p class="hint">已連線裝置：<strong id="connectionCount">0</strong></p>
+              <p class="notice mini ok"><strong>改善掉線：</strong>整場使用同一個 QR；學生手機會保存活動與身分，斷線後自動重連；送不出去的分數會暫存在手機，連上後自動補送。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card stage-card">
+        <div class="stage-head">
+          <div>
+            <p id="roundInfo" class="eyebrow">尚未開始</p>
+            <h2 id="phaseLabel">設定中</h2>
+          </div>
+          <div class="timer" id="timerText">00:00</div>
+        </div>
+        <div class="progress"><div id="timerBar" class="bar"></div></div>
+        <div class="role-grid">
+          <div class="role-box presenter">
+            <span>現在上台</span>
+            <strong id="currentPresenter">—</strong>
+          </div>
+          <div class="role-box next">
+            <span>下一位準備</span>
+            <strong id="nextPresenter">—</strong>
+          </div>
+        </div>
+        <div class="actions centered">
+          <button id="startReportBtn" class="primary">開始報告 1:00</button>
+          <button id="startRatingBtn">評分／換場 1:00</button>
+          <button id="nextPresenterBtn" class="success">下一位＋開始報告</button>
+          <button id="finishBtn">結束活動</button>
+        </div>
+      </section>
+
+      <section class="grid two">
+        <div class="card">
+          <h2>③ 本位同學即時結果</h2>
+          <div class="score-grid">
+            <div><span>總平均</span><strong id="overallAvg">—</strong></div>
+            <div><span>內容重點</span><strong id="contentAvg">—</strong></div>
+            <div><span>學習收穫</span><strong id="insightAvg">—</strong></div>
+            <div><span>表達時間</span><strong id="deliveryAvg">—</strong></div>
+            <div><span>評分進度</span><strong id="scoreCount">0 / 0</strong></div>
+            <div><span>待補人數</span><strong id="missingCount">0</strong></div>
+          </div>
+          <p id="missingStudents" class="hint">尚未評分：—</p>
+          <div class="actions">
+            <button id="exportXlsxBtn" class="primary">下載 Excel</button>
+            <button id="exportJsonBtn">下載 JSON 備份</button>
+            <label class="file-label">匯入 JSON<input id="importJsonInput" type="file" accept="application/json" /></label>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>④ 全部發表總覽</h2>
+          <div class="table-wrap small"><table id="statsTable"></table></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>抽籤發表順序</h2>
+        <div class="table-wrap"><table id="orderTable"></table></div>
+      </section>
+    </main>
+
+    <main id="studentApp" class="mode-panel hidden">
+      <section class="card student-card">
+        <p class="eyebrow">學生評分頁</p>
+        <h2 id="studentTitle">多元選修期末發表</h2>
+        <p id="studentConn" class="pill muted">連線中…</p>
+      </section>
+
+      <section id="resumeCard" class="card hidden">
+        <h2>回到上次活動</h2>
+        <p class="hint">偵測到你之前掃過 QR Code。若只是掉線或重新整理，可以直接回到上次活動。</p>
+        <button id="resumeLastSessionBtn" class="primary wide">使用上次活動連結</button>
+      </section>
+
+      <section class="card">
+        <p id="studentRoundInfo" class="eyebrow">讀取目前發表者中…</p>
+        <div class="role-grid compact">
+          <div class="role-box presenter"><span>正在評分</span><strong id="studentPresenter">—</strong></div>
+          <div class="role-box next"><span>下一位準備</span><strong id="studentNextPresenter">—</strong></div>
+        </div>
+        <p id="studentTimer" class="student-timer">00:00</p>
+      </section>
+
+      <section class="card">
+        <label>我是誰</label>
+        <select id="studentSelect"></select>
+        <p id="identityHint" class="notice mini">選過一次後，手機會記住；下次重新整理或掉線重連時不用再填。</p>
+      </section>
+
+      <section class="card">
+        <h2>本位同學評分</h2>
+        <p class="hint">每項 1–10 分。同一位評分者對同一位報告者重複送出，會視為更新分數。</p>
+
+        <div class="criterion">
+          <label>內容重點清楚 <span>主題明確、重點聚焦、能在 1 分鐘內讓人聽懂。</span></label>
+          <div class="range-row"><input id="score_content" type="range" min="1" max="10" value="8" /><strong id="score_content_Text">8</strong></div>
+        </div>
+
+        <div class="criterion">
+          <label>學習收穫／個人觀點 <span>能說出自己的收穫、觀察、反思或延伸想法。</span></label>
+          <div class="range-row"><input id="score_insight" type="range" min="1" max="10" value="8" /><strong id="score_insight_Text">8</strong></div>
+        </div>
+
+        <div class="criterion">
+          <label>口語表達與時間掌握 <span>聲音清楚、節奏適當、時間控制佳。</span></label>
+          <div class="range-row"><input id="score_delivery" type="range" min="1" max="10" value="8" /><strong id="score_delivery_Text">8</strong></div>
+        </div>
+
+        <label>一句回饋（可不填）</label>
+        <textarea id="studentComment" class="student-comment" placeholder="例如：重點清楚，如果能多舉例會更完整。"></textarea>
+        <button id="submitScoreBtn" class="primary wide">送出／更新評分</button>
+        <p id="submitMsg" class="hint"></p>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
