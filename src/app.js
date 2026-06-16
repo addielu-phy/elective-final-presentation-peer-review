@@ -17,13 +17,14 @@
   const params = new URLSearchParams(location.search);
   const sessionFromUrl = params.get('session') || '';
   const eventFromUrl = params.get('event') || '';
+  const peerServerFromUrl = params.get('server') || 'cloud';
   const isStudentMode = Boolean(sessionFromUrl);
   const now = () => Date.now();
   const safeText = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
   const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
   const randomCode = (len = 6) => Array.from(crypto.getRandomValues(new Uint8Array(len)), (b) => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[b % 32]).join('');
 
-  let state = loadState();
+  let state = null;
   const PEER_ICE_SERVERS = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:global.stun.twilio.com:3478' },
@@ -33,9 +34,20 @@
     { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
     { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
   ];
-  const PEER_OPTIONS = { debug: 1, config: { iceServers: PEER_ICE_SERVERS } };
+  const PEER_SERVERS = [
+    { key: 'cloud', label: 'PeerJS Cloud', options: { host: '0.peerjs.com', port: 443, path: '/', secure: true, key: 'peerjs' } },
+    { key: 'backup', label: '備援 PeerServer', options: { host: 'peerjs-server.onrender.com', port: 443, path: '/', secure: true, key: 'peerjs' } },
+  ];
   const STUDENT_CONNECT_TIMEOUT_MS = 8500;
   const TEACHER_OPEN_TIMEOUT_MS = 12000;
+
+  function peerServerByKey(key) {
+    return PEER_SERVERS.find((server) => server.key === key) || PEER_SERVERS[0];
+  }
+
+  function peerOptions(key, debug = 1) {
+    return { ...peerServerByKey(key).options, debug, config: { iceServers: PEER_ICE_SERVERS } };
+  }
 
   let teacherPeer = null;
   let teacherConnections = new Map();
@@ -48,6 +60,7 @@
   let studentConnectTimer = null;
   let reconnectAttempt = 0;
   let lastBellKey = '';
+  state = loadState();
 
   function escapeHtml(value) {
     return String(value ?? '')
@@ -74,6 +87,7 @@
       title: '多元選修期末發表',
       eventId: `event-${randomCode(8)}`,
       sessionId: '',
+      peerServerKey: 'cloud',
       roster,
       order: randomShuffle(roster.map((p) => p.id)),
       currentIndex: 0,
@@ -106,6 +120,7 @@
       ...base,
       ...parsed,
       schemaVersion: 1,
+      peerServerKey: peerServerByKey(parsed.peerServerKey).key,
       roster,
       order,
       currentIndex: clamp(Number(parsed.currentIndex || 0), 0, Math.max(0, order.length - 1)),
@@ -278,6 +293,8 @@
     return {
       title: state.title,
       eventId: state.eventId,
+      peerServerKey: state.peerServerKey,
+      peerServerLabel: peerServerByKey(state.peerServerKey).label,
       roster: state.roster,
       order: state.order,
       currentIndex: state.currentIndex,
@@ -401,9 +418,13 @@
     catch (_) { prompt('請複製', text); }
   }
 
-  function startTeacherSession() {
+  function startTeacherSession(serverKey = state.peerServerKey || 'cloud', triedServers = []) {
+    if (typeof serverKey !== 'string') {
+      serverKey = state.peerServerKey || 'cloud';
+      triedServers = [];
+    }
     if (!window.Peer) return alert('PeerJS 尚未載入，請確認網路可連到 CDN。');
-    if (teacherPeer && !teacherPeer.destroyed && teacherSessionReady) return;
+    if (teacherPeer && !teacherPeer.destroyed && teacherSessionReady && state.peerServerKey === serverKey) return;
     if (teacherPeer && !teacherPeer.destroyed && !teacherSessionReady) {
       try { teacherPeer.destroy(); } catch (_) {}
     }
@@ -411,29 +432,41 @@
     teacherConnections.clear();
     clearTimeout(teacherOpenTimer);
     if (!state.sessionId) state.sessionId = `mep-${randomCode(7).toLowerCase()}`;
+    state.peerServerKey = peerServerByKey(serverKey).key;
     saveState();
-    $('sessionStatus').textContent = '建立中…';
+    $('sessionStatus').textContent = `建立中…（${peerServerByKey(state.peerServerKey).label}）`;
     renderTeacher(false);
-    teacherPeer = new Peer(state.sessionId, PEER_OPTIONS);
-    teacherOpenTimer = setTimeout(() => {
-      if (teacherSessionReady) return;
-      console.warn('Teacher PeerJS open timeout; retrying with a fresh session id.');
-      $('sessionStatus').textContent = '建立逾時，正在換新代碼重試…';
+    teacherPeer = new Peer(state.sessionId, peerOptions(state.peerServerKey, 1));
+    const tried = Array.from(new Set([...triedServers, state.peerServerKey]));
+    const retryWithNextServer = (reason) => {
+      clearTimeout(teacherOpenTimer);
       try { teacherPeer?.destroy(); } catch (_) {}
       teacherPeer = null;
       teacherSessionReady = false;
       teacherConnections.clear();
-      state.sessionId = `mep-${randomCode(7).toLowerCase()}`;
+      const next = PEER_SERVERS.find((server) => !tried.includes(server.key));
+      if (!next) {
+        $('sessionStatus').textContent = `連線錯誤：${reason}。兩個即時通道都連不上，請換網路/手機熱點後再按建立 Session。`;
+        renderTeacher(false);
+        return;
+      }
+      state.peerServerKey = next.key;
       saveState();
+      $('sessionStatus').textContent = `連線錯誤：${reason}，改用${next.label}重試…`;
       renderTeacher(false);
-      setTimeout(startTeacherSession, 600);
+      setTimeout(() => startTeacherSession(next.key, tried), 700);
+    };
+    teacherOpenTimer = setTimeout(() => {
+      if (teacherSessionReady) return;
+      console.warn('Teacher PeerJS open timeout; retrying with another PeerServer.');
+      retryWithNextServer('建立逾時');
     }, TEACHER_OPEN_TIMEOUT_MS);
     teacherPeer.on('open', (id) => {
       clearTimeout(teacherOpenTimer);
       teacherSessionReady = true;
       state.sessionId = id;
       saveState();
-      $('sessionStatus').textContent = `已建立：${id}`;
+      $('sessionStatus').textContent = `已建立：${id}（${peerServerByKey(state.peerServerKey).label}）`;
       updateStudentUrl(id);
       renderTeacher(false);
     });
@@ -448,7 +481,11 @@
         try { teacherPeer?.destroy(); } catch (_) {}
         teacherPeer = null;
         renderTeacher(false);
-        setTimeout(startTeacherSession, 800);
+        setTimeout(() => startTeacherSession(state.peerServerKey, triedServers), 800);
+        return;
+      }
+      if (err?.type === 'network' || err?.type === 'server-error' || err?.type === 'socket-error' || err?.type === 'socket-closed') {
+        retryWithNextServer(err.type);
         return;
       }
       $('sessionStatus').textContent = `連線錯誤：${err?.type || err?.message || '未知錯誤'}，請再按一次建立 Session`;
@@ -517,9 +554,9 @@
 
   function updateStudentUrl(id = state.sessionId) {
     if (!id) return;
-    const url = `${location.origin}${location.pathname}?session=${encodeURIComponent(id)}&event=${encodeURIComponent(state.eventId)}`;
+    const url = `${location.origin}${location.pathname}?session=${encodeURIComponent(id)}&event=${encodeURIComponent(state.eventId)}&server=${encodeURIComponent(state.peerServerKey || 'cloud')}`;
     $('studentUrl').textContent = url;
-    $('sessionCodeText').textContent = id;
+    $('sessionCodeText').textContent = `${id}（${peerServerByKey(state.peerServerKey).label}）`;
     if (window.QRious) {
       new QRious({ element: $('qrCanvas'), value: url, size: 230, padding: 10, level: 'M' });
     }
@@ -543,7 +580,7 @@
     $('connectionCount').textContent = String([...teacherConnections.values()].filter((c) => c.open).length);
     if (teacherSessionReady && state.sessionId) updateStudentUrl(state.sessionId);
     else {
-      $('sessionCodeText').textContent = state.sessionId ? `${state.sessionId}（未啟用）` : '—';
+      $('sessionCodeText').textContent = state.sessionId ? `${state.sessionId}（${peerServerByKey(state.peerServerKey).label} 未啟用）` : '—';
       $('studentUrl').textContent = state.sessionId ? 'Session 尚未啟用，請等狀態顯示「已建立」後再讓學生掃 QR。' : '尚未建立 session';
       const canvas = $('qrCanvas');
       const ctx2d = canvas?.getContext?.('2d');
@@ -624,13 +661,13 @@
     }
     clearTimeout(reconnectTimer);
     clearTimeout(studentConnectTimer);
-    setStudentConn(`連線中…（第 ${reconnectAttempt + 1} 次嘗試）`, 'muted');
+    setStudentConn(`連線中…（第 ${reconnectAttempt + 1} 次嘗試｜${peerServerByKey(peerServerFromUrl).label}）`, 'muted');
     try {
       if (studentConn && !studentConn.open) studentConn.close();
       if (studentPeer && !studentPeer.destroyed) studentPeer.destroy();
     } catch (_) {}
     studentConn = null;
-    studentPeer = new Peer(undefined, { ...PEER_OPTIONS, debug: 0 });
+    studentPeer = new Peer(undefined, peerOptions(peerServerFromUrl, 0));
     studentConnectTimer = setTimeout(() => {
       const hint = reconnectAttempt >= 2
         ? '仍連不上。請確認老師端顯示「已建立」，學生掃的是最新 QR；若全班都卡住，可能是現場網路阻擋 WebRTC，請改用手機熱點或換網路後重試。'
